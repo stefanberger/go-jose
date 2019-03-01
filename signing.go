@@ -25,6 +25,7 @@ import (
 
 	"golang.org/x/crypto/ed25519"
 
+	"github.com/stefanberger/go-kmip/kmip"
 	"gopkg.in/square/go-jose.v2/json"
 )
 
@@ -175,6 +176,8 @@ func makeJWSRecipient(alg SignatureAlgorithm, signingKey interface{}) (recipient
 		return newEd25519Signer(alg, signingKey)
 	case *rsa.PrivateKey:
 		return newRSASigner(alg, signingKey)
+	case *kmip.RSAPrivateKey:
+		return newKMIPRSASigner(alg, signingKey)
 	case *ecdsa.PrivateKey:
 		return newECDSASigner(alg, signingKey)
 	case []byte:

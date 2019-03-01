@@ -17,6 +17,7 @@
 package jose
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/aes"
 	"crypto/ecdsa"
@@ -28,6 +29,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/stefanberger/go-kmip/kmip"
 	"golang.org/x/crypto/ed25519"
 	"gopkg.in/square/go-jose.v2/cipher"
 	"gopkg.in/square/go-jose.v2/json"
@@ -41,6 +43,11 @@ type rsaEncrypterVerifier struct {
 // A generic RSA-based decrypter/signer
 type rsaDecrypterSigner struct {
 	privateKey *rsa.PrivateKey
+}
+
+// A KMIP RSA decrypter/signer
+type kmipRSADecrypterSigner struct {
+	privateKey *kmip.RSAPrivateKey
 }
 
 // A generic EC-based encrypter/verifier
@@ -108,6 +115,35 @@ func newRSASigner(sigAlg SignatureAlgorithm, privateKey *rsa.PrivateKey) (recipi
 			Key: privateKey.Public(),
 		}),
 		signer: &rsaDecrypterSigner{
+			privateKey: privateKey,
+		},
+	}, nil
+}
+
+// newKMIPRSASigner creates a recipientSigInfo based on the given key.
+func newKMIPRSASigner(sigAlg SignatureAlgorithm, privateKey *kmip.RSAPrivateKey) (recipientSigInfo, error) {
+	// Verify that key management algorithm is supported by this encrypter
+	switch sigAlg {
+	case RS256, RS384, RS512, PS256, PS384, PS512:
+	default:
+		return recipientSigInfo{}, ErrUnsupportedAlgorithm
+	}
+
+	if privateKey == nil {
+		return recipientSigInfo{}, errors.New("invalid private key")
+	}
+
+	pub, err := privateKey.Public()
+	if err != nil {
+		return recipientSigInfo{}, err
+	}
+
+	return recipientSigInfo{
+		sigAlg: sigAlg,
+		publicKey: staticPublicKey(&JSONWebKey{
+			Key: pub,
+		}),
+		signer: &kmipRSADecrypterSigner{
 			privateKey: privateKey,
 		},
 	}, nil
@@ -589,4 +625,85 @@ func (ctx ecEncrypterVerifier) verifyPayload(payload []byte, signature []byte, a
 	}
 
 	return nil
+}
+
+// Decrypt the given payload and return the content encryption key.
+func (ctx kmipRSADecrypterSigner) decryptKey(headers rawHeader, recipient *recipientInfo, generator keyGenerator) ([]byte, error) {
+	return ctx.decrypt(recipient.encryptedKey, headers.getAlgorithm(), generator)
+}
+
+// Decrypt the given payload. Based on the key encryption algorithm,
+// this will either use RSA-PKCS1v1.5 or RSA-OAEP (with SHA-1 or SHA-256).
+func (ctx kmipRSADecrypterSigner) decrypt(jek []byte, alg KeyAlgorithm, generator keyGenerator) ([]byte, error) {
+	// Note: The random reader on decrypt operations is only used for blinding,
+	// so stubbing is meanlingless (hence the direct use of rand.Reader).
+	switch alg {
+	case RSA1_5:
+		// Perform some input validation.
+		pub, err := ctx.privateKey.Public()
+		if err != nil {
+			return nil, err
+		}
+		keyBytes := pub.N.BitLen() / 8
+		if keyBytes != len(jek) {
+			// Input size is incorrect, the encrypted payload should always match
+			// the size of the public modulus (e.g. using a 2048 bit key will
+			// produce 256 bytes of output). Reject this since it's invalid input.
+			return nil, ErrCryptoFailure
+		}
+
+		// When decrypting an RSA-PKCS1v1.5 payload, we must take precautions to
+		// prevent chosen-ciphertext attacks as described in RFC 3218, "Preventing
+		// the Million Message Attack on Cryptographic Message Syntax". We are
+		// therefore deliberately ignoring errors here.
+		cek, err := ctx.privateKey.Decrypt(jek, kmip.Pad_PKCS1_v1_5, kmip.Hash_SHA1)
+		if err != nil {
+			cek, _, err = generator.genKey()
+			if err != nil {
+				return nil, ErrCryptoFailure
+			}
+		}
+		return cek, nil
+	case RSA_OAEP:
+		return ctx.privateKey.Decrypt(jek, kmip.Pad_OAEP, kmip.Hash_SHA1)
+	case RSA_OAEP_256:
+		return ctx.privateKey.Decrypt(jek, kmip.Pad_OAEP, kmip.Hash_SHA256)
+	}
+
+	return nil, ErrUnsupportedAlgorithm
+}
+
+// Sign the given payload
+func (ctx kmipRSADecrypterSigner) signPayload(payload []byte, alg SignatureAlgorithm) (Signature, error) {
+	var hash uint32
+
+	switch alg {
+	case RS256, PS256:
+		hash = kmip.Hash_SHA256
+	case RS384, PS384:
+		hash = kmip.Hash_SHA384
+	case RS512, PS512:
+		hash = kmip.Hash_SHA512
+	default:
+		return Signature{}, ErrUnsupportedAlgorithm
+	}
+
+	var out []byte
+	var err error
+
+	switch alg {
+	case RS256, RS384, RS512:
+		out, err = ctx.privateKey.Sign(bytes.NewReader(payload), kmip.Pad_PKCS1_v1_5, hash)
+	case PS256, PS384, PS512:
+		out, err = ctx.privateKey.Sign(bytes.NewReader(payload), kmip.Pad_PSS, hash)
+	}
+
+	if err != nil {
+		return Signature{}, err
+	}
+
+	return Signature{
+		Signature: out,
+		protected: &rawHeader{},
+	}, nil
 }

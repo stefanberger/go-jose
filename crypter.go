@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/stefanberger/go-kmip/kmip"
 	"gopkg.in/square/go-jose.v2/json"
 )
 
@@ -281,6 +282,10 @@ func newDecrypter(decryptionKey interface{}) (keyDecrypter, error) {
 		}, nil
 	case *ecdsa.PrivateKey:
 		return &ecDecrypterSigner{
+			privateKey: decryptionKey,
+		}, nil
+	case *kmip.RSAPrivateKey:
+		return &kmipRSADecrypterSigner{
 			privateKey: decryptionKey,
 		}, nil
 	case []byte:

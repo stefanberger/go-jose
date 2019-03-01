@@ -31,6 +31,7 @@ import (
 
 	"golang.org/x/crypto/ed25519"
 
+	"github.com/stefanberger/go-kmip/kmip"
 	"gopkg.in/square/go-jose.v2/json"
 )
 
@@ -87,6 +88,8 @@ func (k JSONWebKey) MarshalJSON() ([]byte, error) {
 		raw, err = fromEcPrivateKey(key)
 	case *rsa.PrivateKey:
 		raw, err = fromRsaPrivateKey(key)
+	case *kmip.RSAPrivateKey:
+		return nil, fmt.Errorf("square/go-jose: KMIP key cannot be marshalled to JSON")
 	case []byte:
 		raw, err = fromSymmetricKey(key)
 	default:
@@ -229,6 +232,8 @@ func (k *JSONWebKey) Thumbprint(hash crypto.Hash) ([]byte, error) {
 		input, err = rsaThumbprintInput(key.N, key.E)
 	case *rsa.PrivateKey:
 		input, err = rsaThumbprintInput(key.N, key.E)
+	case *kmip.RSAPrivateKey:
+		return nil, fmt.Errorf("square/go-jose: Cannot calculate thumbprint of KMIP key")
 	case ed25519.PrivateKey:
 		input, err = edThumbprintInput(ed25519.PublicKey(key[0:32]))
 	default:
@@ -265,6 +270,9 @@ func (k *JSONWebKey) Public() JSONWebKey {
 		ret.Key = key.Public()
 	case *rsa.PrivateKey:
 		ret.Key = key.Public()
+	case *kmip.RSAPrivateKey:
+		// Suppressing possible network error!
+		ret.Key, _ = key.Public()
 	case ed25519.PrivateKey:
 		ret.Key = key.Public()
 	default:
@@ -295,6 +303,8 @@ func (k *JSONWebKey) Valid() bool {
 		if key.N == nil || key.E == 0 || key.D == nil || len(key.Primes) < 2 {
 			return false
 		}
+	case *kmip.RSAPrivateKey:
+		return true
 	case ed25519.PublicKey:
 		if len(key) != 32 {
 			return false
